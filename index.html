@@ -15,6 +15,21 @@
 
     <!-- Tailwind（CDN 版，原型使用；正式產品建議改為編譯版） -->
     <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- 嘗試以程式鎖定直向（支援的瀏覽器 / 已加入主畫面時有效） -->
+    <script>
+      function lockPortrait() {
+        try {
+          if (screen.orientation && screen.orientation.lock) {
+            screen.orientation.lock("portrait").catch(function(){});
+          }
+        } catch (e) {}
+      }
+      window.addEventListener("load", lockPortrait);
+      document.addEventListener("visibilitychange", function () {
+        if (!document.hidden) lockPortrait();
+      });
+    </script>
   </head>
   <body>
     <div id="root"></div>
