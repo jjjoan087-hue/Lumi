@@ -500,18 +500,26 @@ const MUSIC_STYLES = [
 const musicEngine = {
   nodes: [],
   current: null,
+  gen: 0,
+  starting: false,
   dispose() {
-    Tone.Transport.stop();
-    Tone.Transport.cancel();
+    try { Tone.Transport.stop(); } catch {}
+    try { Tone.Transport.cancel(); } catch {}
     this.nodes.forEach((n) => { try { n.dispose(); } catch {} });
     this.nodes = [];
     this.current = null;
   },
   async play(style) {
-    if (style === this.current) return;
+    // 每次呼叫拿一個新號碼；若期間又被呼叫，舊的這次就作廢，避免兩軌疊播
+    const myGen = ++this.gen;
+    if (style === this.current && !this.starting) return;
     this.dispose();
-    if (!style || style === "off") return;
+    if (!style || style === "off") { this.current = null; return; }
+    this.starting = true;
     await Tone.start();
+    // 等 Tone.start() 期間若使用者又切了風格 → 放棄這次
+    if (myGen !== this.gen) return;
+
     const reverb = new Tone.Reverb({ decay: 6, wet: 0.5 }).toDestination();
     this.nodes.push(reverb);
 
@@ -571,24 +579,36 @@ const musicEngine = {
       }, "2n").start(0);
       this.nodes.push(pad, padLoop, bell, bellLoop);
     }
+    // 建好節點後再檢查一次，若已被新的呼叫取代就拆掉，不要播
+    if (myGen !== this.gen) { this.dispose(); return; }
     Tone.Transport.start();
     this.current = style;
+    this.starting = false;
   },
 };
 
 /* 第一次觸碰畫面時自動開始播放（瀏覽器音訊政策要求） */
 function useAutoMusic(style) {
   const started = useRef(false);
+  const styleRef = useRef(style);
+  useEffect(() => { styleRef.current = style; }, [style]);
   useEffect(() => {
     const unlock = () => {
       if (started.current) return;
       started.current = true;
-      musicEngine.play(style);
+      musicEngine.play(styleRef.current); // 用最新的風格，而非掛載當下的舊值
     };
-    window.addEventListener("pointerdown", unlock, { once: false });
-    return () => window.removeEventListener("pointerdown", unlock);
+    // 各種第一手勢都嘗試解鎖，讓「一進 app 就有音樂」更容易觸發
+    const opts = { once: false };
+    window.addEventListener("pointerdown", unlock, opts);
+    window.addEventListener("touchstart", unlock, opts);
+    window.addEventListener("keydown", unlock, opts);
+    return () => {
+      window.removeEventListener("pointerdown", unlock);
+      window.removeEventListener("touchstart", unlock);
+      window.removeEventListener("keydown", unlock);
+    };
   }, []);
-  // 風格變更時（含已啟動後）即時切換
   useEffect(() => {
     if (started.current) musicEngine.play(style);
   }, [style]);
@@ -698,15 +718,18 @@ function GlobalStyle() {
       .paper-grain {
         background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23g)' opacity='0.05'/%3E%3C/svg%3E");
       }
-      /* 背景點綴 */
-      .drift-a { animation: driftA 30s ease-in-out infinite; will-change: transform; }
-      .drift-b { animation: driftB 38s ease-in-out infinite; will-change: transform; }
-      @keyframes driftA { 0%,100% { transform: translate3d(0,0,0);} 50% { transform: translate3d(20px,-12px,0);} }
-      @keyframes driftB { 0%,100% { transform: translate3d(0,0,0);} 50% { transform: translate3d(-22px,10px,0);} }
-      .twinkle { animation: twinkle 4.5s ease-in-out infinite; }
-      @keyframes twinkle {
-        0%, 100% { opacity: .18; transform: scale(.85); }
-        50% { opacity: .55; transform: scale(1.05); }
+      /* 背景點綴：靜態閃爍 + 飄落小星 */
+      .deco-twinkle { animation: decoTwinkle ease-in-out infinite; will-change: opacity, transform; }
+      @keyframes decoTwinkle {
+        0%, 100% { opacity: .16; transform: scale(.82); }
+        50% { opacity: .5; transform: scale(1.08); }
+      }
+      .deco-fall { animation: decoFall linear infinite; will-change: transform, opacity; }
+      @keyframes decoFall {
+        0% { transform: translate3d(0,-24px,0) rotate(0deg); opacity: 0; }
+        12% { opacity: .42; }
+        88% { opacity: .42; }
+        100% { transform: translate3d(0,105vh,0) rotate(40deg); opacity: 0; }
       }
       /* 寄出動畫的雲層 */
       .cloud-l { animation: cloudL linear infinite; will-change: transform; }
@@ -743,6 +766,7 @@ function GlobalStyle() {
       .app-bg-gradient{background:linear-gradient(to bottom, #FBF7EC, #F6F1E6 50%, #E9E4D6);}
       .fade-top{background:linear-gradient(to bottom, #FAF8F4, rgba(250,248,244,0));}
       .fade-bottom{background:linear-gradient(to top, #FAF8F4, rgba(250,248,244,0));}
+
 
       .state-glow { animation: stateGlow 2.6s ease-in-out infinite; }
       @keyframes stateGlow {
@@ -923,31 +947,45 @@ function SoftCloud({ w = 200, opacity = 1, blur = 2, fill = "#FFFFFF", style, cl
    背景點綴：柔和雲朵 + 會呼吸的小星星
 ---------------------------------------------------------------- */
 function BackdropDeco() {
-  const star = (k, style, s = 1, delay = "0s") => (
-    <svg key={k} width={16 * s} height={16 * s} viewBox="0 0 16 16"
-         className="twinkle" style={{ position: "absolute", animationDelay: delay, ...style }}>
-      <path d="M8 0.5 L9.5 6.5 L15.5 8 L9.5 9.5 L8 15.5 L6.5 9.5 L0.5 8 L6.5 6.5 Z" fill="#C9BFA4" />
-    </svg>
-  );
+  const GOLD = "#C9BFA4", GOLD2 = "#B89F6B";
+  const starPath = "M8 0.5 L9.5 6.5 L15.5 8 L9.5 9.5 L8 15.5 L6.5 9.5 L0.5 8 L6.5 6.5 Z";
+
+  // 背景：原地呼吸閃爍的星
+  const twinkles = [
+    { top: "14%", left: "14%", s: 11, d: "0s", dur: "4s" },
+    { top: "16%", right: "18%", s: 12, d: "0.5s", dur: "5s" },
+    { top: "40%", left: "9%", s: 9, d: "1s", dur: "6s" },
+    { top: "52%", right: "11%", s: 12, d: "1.5s", dur: "4.5s" },
+    { bottom: "30%", left: "16%", s: 9, d: "2s", dur: "5.5s" },
+    { bottom: "18%", right: "22%", s: 11, d: "0.8s", dur: "5s" },
+  ];
+  // 前景：緩緩飄落的星（少量，才不會太吵）
+  const falls = [
+    { left: "18%", s: 12, dur: "15s", delay: "-2s", col: GOLD },
+    { left: "44%", s: 9, dur: "18s", delay: "-9s", col: GOLD2 },
+    { left: "68%", s: 13, dur: "16s", delay: "-5s", col: GOLD },
+    { left: "86%", s: 8, dur: "20s", delay: "-13s", col: GOLD2 },
+    { left: "6%", s: 10, dur: "19s", delay: "-16s", col: GOLD },
+  ];
+
   return (
-    <div className="absolute inset-0 pointer-events-none overflow-hidden" aria-hidden="true" style={{ opacity: 0.38 }}>
-      <div className="drift-a" style={{ position: "absolute", top: "4%", left: "-12%" }}>
-        <SoftCloud w={230} opacity={0.5} blur={4} fill="#FFFFFF" />
-      </div>
-      <div className="drift-b" style={{ position: "absolute", top: "20%", right: "-16%" }}>
-        <SoftCloud w={280} opacity={0.42} blur={5} fill="#FFFFFF" />
-      </div>
-      <div className="drift-a" style={{ position: "absolute", bottom: "22%", left: "-14%" }}>
-        <SoftCloud w={200} opacity={0.38} blur={5} fill="#FFFFFF" />
-      </div>
-      <div className="drift-b" style={{ position: "absolute", bottom: "2%", right: "-10%" }}>
-        <SoftCloud w={250} opacity={0.48} blur={4} fill="#FFFFFF" />
-      </div>
-      {star("s1", { top: "13%", right: "18%" }, 1.1, "0s")}
-      {star("s2", { top: "34%", left: "9%" }, 0.75, "1.1s")}
-      {star("s3", { top: "52%", right: "11%" }, 0.9, "2.2s")}
-      {star("s4", { bottom: "30%", left: "16%" }, 1.25, "0.6s")}
-      {star("s5", { bottom: "12%", right: "24%" }, 0.8, "1.7s")}
+    <div className="absolute inset-0 pointer-events-none overflow-hidden" aria-hidden="true">
+      {twinkles.map((t, i) => (
+        <svg key={`tw${i}`} width={t.s} height={t.s} viewBox="0 0 16 16"
+             className="deco-twinkle"
+             style={{ position: "absolute", top: t.top, bottom: t.bottom, left: t.left, right: t.right,
+                      animationDelay: t.d, animationDuration: t.dur }}>
+          <path d={starPath} fill={GOLD} />
+        </svg>
+      ))}
+      {falls.map((f, i) => (
+        <svg key={`fl${i}`} width={f.s} height={f.s} viewBox="0 0 16 16"
+             className="deco-fall"
+             style={{ position: "absolute", top: 0, left: f.left,
+                      animationDuration: f.dur, animationDelay: f.delay }}>
+          <path d={starPath} fill={f.col} />
+        </svg>
+      ))}
     </div>
   );
 }
@@ -1465,6 +1503,8 @@ export default function App() {
             collectedDates={collectedDates}
             yearLetter={yearLetter}
             setYearLetter={setYearLetter}
+            daily={daily}
+            onOpenDay={(ds) => { setPage(2); setShowDayModal(ds); }}
             onEdit={() => setShowEditChar(true)}
             onSettings={() => setShowSettings(true)}
           />
@@ -1472,7 +1512,7 @@ export default function App() {
         </div>
       </div>
 
-      <div className="shrink-0 border-t border-line bg-paper flex justify-around items-center py-2">
+      <div className="shrink-0 border-t border-line bg-paper flex items-stretch py-2.5 pb-3">
         {[
           { id: 1, icon: Home, label: "首頁" },
           { id: 2, icon: CalendarDays, label: "日曆" },
@@ -1482,10 +1522,10 @@ export default function App() {
           <button
             key={it.id}
             onClick={() => setPage(it.id)}
-            className={`flex flex-col items-center gap-1 px-4 py-1 ${page === it.id ? "text-ink" : "text-mute2"}`}
+            className={`flex-1 flex flex-col items-center gap-1.5 py-1.5 ${page === it.id ? "text-ink" : "text-mute2"}`}
           >
-            <it.icon size={20} strokeWidth={page === it.id ? 2.4 : 1.8} />
-            <span className="fs-10 tracking-wide">{it.label}</span>
+            <it.icon size={25} strokeWidth={page === it.id ? 2.4 : 1.8} />
+            <span className="fs-12 tracking-wide">{it.label}</span>
           </button>
         ))}
       </div>
@@ -1582,7 +1622,7 @@ function OnboardWizard({ initial, mode, onFinish, onClose }) {
             </div>
 
             <div>
-              <div className="fs-15 font-medium text-brown2 mb-2">座右銘（之後可更改）</div>
+              <div className="fs-15 font-medium text-brown2 mb-2">座右銘</div>
               <input
                 value={form.motto}
                 onChange={(e) => setForm({ ...form, motto: e.target.value })}
@@ -1607,7 +1647,6 @@ function OnboardWizard({ initial, mode, onFinish, onClose }) {
           <div className="space-y-6">
             <div className="text-center">
               <div className="font-serif text-xl">今年，想往哪裡走？</div>
-              <div className="fs-13 text-mute mt-1">會顯示在首頁最上方的跑馬燈</div>
             </div>
             <div>
               <div className="fs-15 font-medium text-brown2 mb-2">年度目標</div>
@@ -1671,7 +1710,6 @@ function HomePage({
       )}
       <div className="px-5 pt-5 pb-8 space-y-8">
         <div className="flex items-center gap-3">
-          <MoodAvatar score={computeFinalScore(rec)} size={66} showLabel={false} circle />
           <div className="min-w-0 flex-1">
             <div className="fs-11 text-mute">
               {new Date().toLocaleDateString("zh-TW", { month: "long", day: "numeric", weekday: "short" })}
@@ -1684,12 +1722,7 @@ function HomePage({
               {streak > 0 && ` · 已連續紀錄 ${streak} 天`}
             </div>
           </div>
-          <div className="text-right shrink-0 pl-1">
-            <div className="fs-9 text-mute2 ls-0p15">今日</div>
-            <div className="font-serif text-2xl leading-none mt-1">
-              {computeFinalScore(rec) ?? "－"}
-            </div>
-          </div>
+          <MoodAvatar score={computeFinalScore(rec)} size={66} showLabel={false} circle />
         </div>
 
         {slump && (
@@ -1816,7 +1849,7 @@ function HomePage({
         />
         {rec.photo ? (
           <div className="relative">
-            <img src={rec.photo} className="w-full h-48 object-cover rounded-2xl" />
+            <img src={rec.photo} className="w-full h-48 object-cover rounded-2xl" style={{ objectPosition: `center ${rec.photoPos ?? 50}%` }} />
             <button onClick={() => fileRef.current.click()} className="absolute bottom-3 right-3 bg-ink text-white rounded-full p-2">
               <Camera size={14} />
             </button>
@@ -2162,9 +2195,25 @@ function DayModal({ date, record, yearGoal, todos = [], prevScore = null, onClos
         <div>
           <SectionLabel>今日值得紀錄的照片</SectionLabel>
           <input type="file" accept="image/*" ref={fileRef} className="hidden"
-            onChange={async (e) => e.target.files[0] && updateRecord({ photo: await resizeImageToDataURL(e.target.files[0]) })} />
+            onChange={async (e) => e.target.files[0] && updateRecord({ photo: await resizeImageToDataURL(e.target.files[0]), photoPos: 50 })} />
           {record.photo ? (
-            <img src={record.photo} onClick={() => fileRef.current.click()} className="w-full h-40 object-cover rounded-xl" />
+            <>
+              <img
+                src={record.photo}
+                onClick={() => fileRef.current.click()}
+                className="w-full h-40 object-cover rounded-xl"
+                style={{ objectPosition: `center ${record.photoPos ?? 50}%` }}
+              />
+              <div className="flex items-center gap-2 mt-2">
+                <span className="fs-9 text-mute2 shrink-0">上下位置</span>
+                <input
+                  type="range" min="0" max="100"
+                  value={record.photoPos ?? 50}
+                  onChange={(e) => updateRecord({ photoPos: Number(e.target.value) })}
+                  className="flex-1 accent-ink"
+                />
+              </div>
+            </>
           ) : (
             <button onClick={() => fileRef.current.click()} className="w-full h-24 rounded-xl border border-dashed border-line3 flex items-center justify-center text-mute text-xs gap-2">
               <Camera size={16} /> 新增照片
@@ -2442,8 +2491,9 @@ function PostcardPage({ character, postcards, setPostcards, openPostcard, setOpe
 /* ---------------------------------------------------------------
    頁面 4：個人檔案
 ---------------------------------------------------------------- */
-function ProfilePage({ character, tier = "none", avgScore, collectedCount = 0, deckSize = 0, collectedCards = [], collectedDates = {}, yearLetter, setYearLetter, onEdit, onSettings }) {
+function ProfilePage({ character, tier = "none", avgScore, collectedCount = 0, deckSize = 0, collectedCards = [], collectedDates = {}, yearLetter, setYearLetter, daily = {}, onOpenDay, onEdit, onSettings }) {
   const [showGallery, setShowGallery] = useState(false);
+  const [showSearch, setShowSearch] = useState(false);
   const tierLabel = {
     none: "尚未累積紀錄",
     plain: "持續紀錄中",
@@ -2474,6 +2524,17 @@ function ProfilePage({ character, tier = "none", avgScore, collectedCount = 0, d
             <div className="fs-11 text-mute mt-0.5">
               {deckComplete ? "已經收集完成，開始新的一輪循環 ✦" : `已收集 ${collectedCount} / ${deckSize} 張`}
             </div>
+          </div>
+          <ChevronRight size={16} className="text-mute2" />
+        </button>
+
+        <button
+          onClick={() => setShowSearch(true)}
+          className="w-full mt-3 border border-line rounded-2xl px-4 py-3 flex items-center justify-between text-left"
+        >
+          <div>
+            <div className="fs-13 font-medium">搜尋日記</div>
+            <div className="fs-11 text-mute mt-0.5">找回以前寫過的字句與那一天</div>
           </div>
           <ChevronRight size={16} className="text-mute2" />
         </button>
@@ -2522,7 +2583,86 @@ function ProfilePage({ character, tier = "none", avgScore, collectedCount = 0, d
           </div>
         </Modal>
       )}
+      {showSearch && (
+        <DiarySearchModal
+          daily={daily}
+          onClose={() => setShowSearch(false)}
+          onOpenDay={(ds) => { setShowSearch(false); onOpenDay && onOpenDay(ds); }}
+        />
+      )}
     </div>
+  );
+}
+
+/* ---------------------------------------------------------------
+   日記搜尋
+---------------------------------------------------------------- */
+function DiarySearchModal({ daily, onClose, onOpenDay }) {
+  const [q, setQ] = useState("");
+  const query = q.trim().toLowerCase();
+
+  const results = Object.entries(daily)
+    .filter(([, r]) => r && (r.journal || r.wheelPick || r.insightCard))
+    .map(([ds, r]) => ({ ds, r }))
+    .filter(({ r }) => {
+      if (!query) return true;
+      const hay = [r.journal, r.wheelPick, r.insightCard?.word, r.insightCard?.meaning]
+        .filter(Boolean).join(" ").toLowerCase();
+      return hay.includes(query);
+    })
+    .sort((a, b) => (a.ds < b.ds ? 1 : -1));
+
+  const highlight = (text) => {
+    if (!query || !text) return text;
+    const idx = text.toLowerCase().indexOf(query);
+    if (idx < 0) return text;
+    return (
+      <>
+        {text.slice(0, idx)}
+        <span className="bg-tan text-brown2" style={{ borderRadius: 3, padding: "0 1px" }}>{text.slice(idx, idx + query.length)}</span>
+        {text.slice(idx + query.length)}
+      </>
+    );
+  };
+
+  return (
+    <Modal onClose={onClose} width="max-w-md">
+      <div className="p-6 space-y-4">
+        <div className="flex items-center justify-between">
+          <div className="font-serif text-lg">搜尋日記</div>
+          <button onClick={onClose}><X size={18} /></button>
+        </div>
+        <input
+          autoFocus
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="輸入關鍵字，例如「散步」「累」"
+          className="w-full border border-line rounded-xl px-4 py-2.5 text-sm outline-none bg-paper"
+          style={{ boxSizing: "border-box" }}
+        />
+        <div className="fs-11 text-mute2">{query ? `找到 ${results.length} 天` : `共 ${results.length} 天有紀錄`}</div>
+        <div className="space-y-2" style={{ maxHeight: "52vh", overflowY: "auto" }}>
+          {results.length === 0 && (
+            <div className="text-center text-mute2 text-sm py-8">{query ? "沒有符合的日記" : "還沒有寫過日記"}</div>
+          )}
+          {results.map(({ ds, r }) => {
+            const d = new Date(ds);
+            const fs = computeFinalScore(r);
+            return (
+              <button key={ds} onClick={() => onOpenDay(ds)} className="block w-full text-left border border-line rounded-xl p-3">
+                <div className="flex items-center justify-between">
+                  <div className="fs-12 font-medium text-brown2">{d.getFullYear()} / {d.getMonth() + 1} / {d.getDate()}（{"日一二三四五六"[d.getDay()]}）</div>
+                  {fs !== null && <div className="fs-11 text-mute2">{fs} 分</div>}
+                </div>
+                {r.insightCard?.word && <div className="fs-11 text-gold mt-1">關鍵字 · {highlight(r.insightCard.word)}</div>}
+                {r.wheelPick && <div className="fs-11 text-mute mt-0.5">任務 · {highlight(r.wheelPick)}</div>}
+                {r.journal && <div className="fs-12 text-brown mt-1 leading-relaxed" style={{ display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{highlight(r.journal)}</div>}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    </Modal>
   );
 }
 
@@ -2550,10 +2690,49 @@ function TimeSelect({ value, onChange }) {
 
 function SettingsModal({ settings, setSettings, onClose }) {
   const [form, setForm] = useState(settings);
+  const [msg, setMsg] = useState("");
+  const importRef = useRef(null);
+
+  const ALL_KEYS = [K_CHAR, K_SETTINGS, K_TODOS, K_DAILY, K_POSTCARDS, K_LETTERS, K_YEARLETTER, K_GENTLE];
+
+  const exportData = () => {
+    const bundle = { _app: "Lumi", _version: 1, _exportedAt: new Date().toISOString(), data: {} };
+    ALL_KEYS.forEach((k) => {
+      const raw = localStorage.getItem(k);
+      if (raw !== null) bundle.data[k] = raw;
+    });
+    const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const d = new Date();
+    a.href = url;
+    a.download = `lumi-backup-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    setMsg("已匯出備份檔");
+    setTimeout(() => setMsg(""), 2500);
+  };
+
+  const importData = async (file) => {
+    try {
+      const text = await file.text();
+      const bundle = JSON.parse(text);
+      if (!bundle || bundle._app !== "Lumi" || !bundle.data) throw new Error("格式不符");
+      Object.entries(bundle.data).forEach(([k, v]) => {
+        if (ALL_KEYS.includes(k)) localStorage.setItem(k, v);
+      });
+      setMsg("匯入成功，即將重新載入…");
+      setTimeout(() => window.location.reload(), 1200);
+    } catch {
+      setMsg("匯入失敗：檔案格式不正確");
+      setTimeout(() => setMsg(""), 3000);
+    }
+  };
+
   return (
     <Modal onClose={onClose}>
       <div className="p-6 space-y-6" style={{ maxWidth: "100%", overflowX: "hidden", boxSizing: "border-box" }}>
-        <div className="font-serif text-lg">提醒設定</div>
+        <div className="font-serif text-lg">設定</div>
         <div>
           <SectionLabel>洞見卡通知時間</SectionLabel>
           <TimeSelect value={form.cardTime} onChange={(v) => setForm({ ...form, cardTime: v })} />
@@ -2574,6 +2753,20 @@ function SettingsModal({ settings, setSettings, onClose }) {
           </select>
           <p className="fs-10 text-mute2 mt-1">開啟 App 後第一次觸碰畫面即自動播放</p>
         </div>
+
+        <div>
+          <SectionLabel>資料備份</SectionLabel>
+          <div className="flex gap-2">
+            <button onClick={exportData} className="flex-1 border border-ink rounded-full py-2.5 fs-12 text-ink">匯出備份</button>
+            <button onClick={() => importRef.current?.click()} className="flex-1 border border-line rounded-full py-2.5 fs-12 text-mute">匯入還原</button>
+          </div>
+          <input ref={importRef} type="file" accept="application/json,.json" className="hidden"
+                 onChange={(e) => e.target.files[0] && importData(e.target.files[0])} />
+          <p className="fs-10 text-mute2 mt-2 leading-relaxed">資料只存在這支手機的瀏覽器裡。換手機、清除快取前，記得先「匯出備份」存成檔案，之後就能「匯入還原」。</p>
+        </div>
+
+        {msg && <div className="bg-ink text-paper fs-12 rounded-xl px-4 py-2.5 text-center">{msg}</div>}
+
         <p className="fs-11 text-mute2 leading-relaxed">此原型會保存你設定的時間，但預覽環境無法真正推播系統通知；正式上架後這裡會串接手機的推播提醒。</p>
         <button onClick={() => { setSettings(form); onClose(); }} className="w-full bg-ink text-white rounded-full py-3 text-sm">儲存設定</button>
       </div>
